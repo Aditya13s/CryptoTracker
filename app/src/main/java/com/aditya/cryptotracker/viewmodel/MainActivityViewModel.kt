@@ -43,6 +43,7 @@ class MainActivityViewModel @Inject constructor(
 
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
         handleError(throwable)
+        isFetchingData = false
     }
 
     init {
@@ -67,59 +68,50 @@ class MainActivityViewModel @Inject constructor(
 
     private fun fetchDataWithRetry() {
         viewModelScope.launch(coroutineExceptionHandler) {
-            for (retryCount in 0 until Constants.RETRY_COUNT) {
-                try {
-                    fetchData()
-                    break
-                } catch (e: IOException) {
-                    handleRetryDelay(retryCount)
-                } catch (e: Exception) {
-                    handleError(e)
-                    break
-                }
-            }
-        }
-    }
-
-    private suspend fun handleRetryDelay(retryCount: Int) {
-        delay(1000 * (2.toDouble().pow(retryCount)).toLong())
-    }
-
-    private fun fetchData() {
-        viewModelScope.launch(coroutineExceptionHandler) {
             isFetchingData = true
 
             if (!networkManager.isNetworkAvailable()) {
                 updateCurrency(Result.Error("No internet Connection"))
+                isFetchingData = false
                 return@launch
             }
             updateCurrency(Result.Loading)
 
             val result = withContext(Dispatchers.IO) {
-                val currencyListDeferred = async { currencyRepository.getCurrencyList() }
-                val exchangeRatesDeferred = async { currencyRepository.getExchangeRates() }
+                try {
+                    val currencyListDeferred = async { currencyRepository.getCurrencyList() }
+                    val exchangeRatesDeferred = async { currencyRepository.getExchangeRates() }
 
-                val currencyList = currencyListDeferred.await()
-                val exchangeRates = exchangeRatesDeferred.await()
+                    val currencyList = currencyListDeferred.await()
+                    val exchangeRates = exchangeRatesDeferred.await()
 
-                val combinedDataList = exchangeRates.rates.keys.mapNotNull { symbol ->
-                    val exchangeRate = exchangeRates.rates[symbol]
-                    val roundedExchangeRate = appUtils.roundTo6DecimalPlaces(exchangeRate)
-                    val currencyInfo = currencyList.crypto[symbol]
+                    val combinedDataList = exchangeRates.rates.keys.mapNotNull { symbol ->
+                        val exchangeRate = exchangeRates.rates[symbol]
+                        val roundedExchangeRate = appUtils.roundTo6DecimalPlaces(exchangeRate)
+                        val currencyInfo = currencyList.crypto[symbol]
 
-                    if (currencyInfo != null) {
-                        CurrencyCombinedData(roundedExchangeRate, currencyInfo)
-                    } else {
-                        null
+                        if (currencyInfo != null) {
+                            CurrencyCombinedData(roundedExchangeRate, currencyInfo)
+                        } else {
+                            null
+                        }
                     }
-                }
 
-                combinedDataList
+                    Result.Success(combinedDataList)
+                } catch (e: Exception) {
+                    handleError(e)
+                    Result.Error("Error fetching data")
+                }
             }
 
-            updateCurrency(Result.Success(result))
+            updateCurrency(result)
+            isFetchingData = false
             _lastRefreshTime.postValue("Last Refresh: ${appUtils.getCurrentDateTime()}")
         }
+    }
+
+    private suspend fun handleRetryDelay(retryCount: Int) {
+        delay(1000 * (2.toDouble().pow(retryCount)).toLong())
     }
 
     private fun handleError(throwable: Throwable) {
